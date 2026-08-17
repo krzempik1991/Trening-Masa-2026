@@ -1,81 +1,74 @@
-// KrzempiK Dieta — Service Worker v1.0
-const CACHE_NAME = 'krzempik-dieta-v1';
+// ── KrzempiK Service Worker v4 ──
+const CACHE_NAME = 'krzempi-v4';
 
-// Pliki do cache'owania przy instalacji
-const STATIC_ASSETS = [
+const APP_SHELL = [
   './',
   './index.html',
-  './manifest.json',
-  './icon-192.png',
-  './icon-512.png',
-  'https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap'
 ];
 
-// ── INSTALACJA: pobierz i zapisz wszystkie zasoby ──
-self.addEventListener('install', event => {
+const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
+
+self.addEventListener('install', function(event) {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return cache.addAll(STATIC_ASSETS).catch(err => {
-        // Jeśli font Google nie ładuje się offline — pomijamy, reszta musi być
-        console.warn('SW install partial fail:', err);
-        return cache.addAll(['./', './index.html', './manifest.json']);
-      });
-    }).then(() => self.skipWaiting())
-  );
-});
-
-// ── AKTYWACJA: usuń stare wersje cache ──
-self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(key => key !== CACHE_NAME)
-          .map(key => caches.delete(key))
-      )
-    ).then(() => self.clients.claim())
-  );
-});
-
-// ── FETCH: Cache-first dla lokalnych, Network-first dla zewnętrznych ──
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
-
-  // Zasoby lokalne — cache first
-  if (url.origin === location.origin) {
-    event.respondWith(
-      caches.match(event.request).then(cached => {
-        if (cached) return cached;
-        return fetch(event.request).then(response => {
-          if (response && response.status === 200) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          }
-          return response;
-        }).catch(() => {
-          // Offline fallback — zwróć index.html
-          return caches.match('./index.html');
-        });
-      })
-    );
-    return;
-  }
-
-  // Google Fonts i inne zewnętrzne — network first, fallback cache
-  event.respondWith(
-    fetch(event.request).then(response => {
-      if (response && response.status === 200) {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-      }
-      return response;
-    }).catch(() => {
-      return caches.match(event.request);
+    caches.open(CACHE_NAME).then(function(cache) {
+      return cache.addAll(APP_SHELL);
+    }).then(function() {
+      return self.skipWaiting();
     })
   );
 });
 
-// ── PUSH: opcjonalne powiadomienia (przyszłość) ──
-self.addEventListener('message', event => {
-  if (event.data === 'skipWaiting') self.skipWaiting();
+self.addEventListener('activate', function(event) {
+  event.waitUntil(
+    caches.keys().then(function(keys) {
+      return Promise.all(
+        keys.filter(function(key) { return key !== CACHE_NAME; })
+            .map(function(key) { return caches.delete(key); })
+      );
+    }).then(function() {
+      return self.clients.claim();
+    })
+  );
 });
+
+self.addEventListener('fetch', function(event) {
+  const url = new URL(event.request.url);
+
+  if (FONT_HOSTS.includes(url.hostname)) {
+    event.respondWith(staleWhileRevalidate(event.request));
+    return;
+  }
+
+  if (url.origin === self.location.origin) {
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
+});
+
+async function networkFirst(request) {
+  try {
+    const networkResponse = await fetch(request);
+    if (networkResponse && networkResponse.status === 200) {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(request, networkResponse.clone());
+    }
+    return networkResponse;
+  } catch (err) {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    return caches.match('./index.html');
+  }
+}
+
+async function staleWhileRevalidate(request) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request);
+  const networkPromise = fetch(request).then(function(networkResponse) {
+    if (networkResponse && networkResponse.status === 200) {
+      cache.put(request, networkResponse.clone());
+    }
+    return networkResponse;
+  }).catch(function() { return null; });
+
+  return cached || networkPromise;
+}
